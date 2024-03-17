@@ -3,7 +3,7 @@
 -include("/usr/lib/erlang/lib/xmerl-1.3.28/include/xmerl.hrl").
 -include("/usr/lib/erlang/lib/inets-7.5/include/httpd.hrl").
 
--export([result/0, is_rss2_feed/1, get_feed_items/2, get_item_time/1, compare_feed_items/2]).
+-export([result/0, is_rss2_feed/1, get_feed_items/2, get_items_string/1, get_item_time/1, compare_feed_items/2]).
 
 is_rss2_feed(Data) ->
     {R, _} = Data,
