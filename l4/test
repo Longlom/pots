@@ -1,0 +1,14 @@
+c(rss_parse).
+
+c(rss_queue). 
+
+{ok, QPid} = rss_queue:start().
+RSS1 = xmerl_scan:file("digg-science-rss1.xml"). 
+{Feed1, _} = RSS1. 
+Feed1Items = rss_parse:get_feed_items(Feed1, []),
+io:format("Parsed Items: ~p~n", [Feed1Items]).
+
+rss_queue:add_feed(QPid, Feed1Items).
+{ok, QueueItems} = rss_queue:get_all(QPid).
+
+io:format("Items in queue: ~p~n", [QueueItems]).
