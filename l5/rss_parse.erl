@@ -1,139 +1,85 @@
--module(rss_parse).
--author("longlom").
--include("/usr/lib/erlang/lib/xmerl-1.3.28/include/xmerl.hrl").
--include("/usr/lib/erlang/lib/inets-7.5/include/httpd.hrl").
+-module (rss_parse).
 
--export([result/0, is_rss2_feed/1, get_feed_items/2, get_items_string/1, get_item_time/1, compare_feed_items/2]).
+-include_lib("xmerl/include/xmerl.hrl").
+-export ([is_rss2_feed/1]).
+-export ([get_feed_items/1]).
+-export ([get_item_time/1]).
+-export ([compare_feed_items/2]).
 
-is_rss2_feed(Data) ->
-    {R, _} = Data,
-    if
-        is_record(R, xmlElement) ->
-            Filter_func = fun({_, Name, _, _, _, _, _, _, Value, _}) ->
-                Name == version andalso Value == "2.0"
-            end,
-            Result = lists:filter(Filter_func, R#xmlElement.attributes),
-            if
-                length(Result) == 1 -> true;
-                true -> false
-            end;
-        true ->
-            false
+is_rss2_feed(XML) ->
+    VerXPath = "@version",
+    case XML#xmlElement.name of
+        rss -> case (lists:nth(1, xmerl_xpath:string(VerXPath, XML)))#xmlAttribute.value of
+            "2.0" -> ok;
+            _ -> false
+        end; 
+        _ -> false
     end.
 
-get_feed_items(Record, List) ->
-    if
-        is_record(Record, xmlElement) ->
-            if
-                Record#xmlElement.name == item -> [Record | List];
-                true -> lists:foldl(fun get_feed_items/2, List, Record#xmlElement.content)
-            end;
-        true ->
-            List
-    end.
-
-get_item_string(Item) ->
-    Title = get_item_parameter(Item, title),
-    Link = get_item_parameter(Item, link),
-    GUID = get_item_parameter(Item, guid),
-    Time = get_item_parameter(Item, pubDate),
-    {GUID, Title, Link, Time}.
-
-get_items_string(Feed) ->
-    lists:foldl(fun(Item, List) -> [get_item_string(Item) | List] end, [], Feed).
-
-get_item_parameter(Item, Parameter) ->
-    L = lists:filter(
-        fun(Elem) -> element(1, Elem) == xmlElement andalso element(2, Elem) == Parameter end,
-        Item#xmlElement.content
-    ),
-    if
-        length(L) > 0 ->
-            Container = lists:nth(1, L),
-            Text = lists:nth(1, Container#xmlElement.content),
-            Text#xmlText.value;
-        true ->
-            false
-    end.
+get_feed_items(RSS2Feed) ->
+    ItemsXPath = "//item",
+    xmerl_xpath:string(ItemsXPath, RSS2Feed).
 
 get_item_time(Item) ->
-    Value = get_item_parameter(Item, pubDate),
-    if
-        Value == false ->
-            bad_date;
-        true ->
-            RequestDate = httpd_util:convert_request_date(Value),
-            if
-                RequestDate == bad_date -> RequestDate;
-                true -> calendar:datetime_to_gregorian_seconds(RequestDate)
+    PubDateXPath = "//pubDate",
+    [PubDateNode | _] = xmerl_xpath:string(PubDateXPath, Item),
+    [PubDate | _] = PubDateNode#xmlElement.content,
+    DateTime = httpd_util:convert_request_date(PubDate#xmlText.value), % bad_time if wrong
+    calendar:datetime_to_gregorian_seconds(DateTime).
+
+% @private
+% @doc Эта вспомогательная функция просматривает заданный XML элемент
+%     и удаляет из него сведения о других XML элементах, например содержащиеся в полях
+%     "parents" или "pos".
+%
+% @spec extract_xml(Node::xmlAny()) -> xmlAny()
+%
+extract_xml(Elem = #xmlElement{}) ->
+    Elem#xmlElement{parents=[], pos=0,
+        content=lists:map(fun extract_xml/1, Elem#xmlElement.content),
+        attributes=lists:map(fun extract_xml/1, Elem#xmlElement.attributes)};
+extract_xml(Attr = #xmlAttribute{}) ->
+    Attr#xmlAttribute{parents=[], pos=0};
+extract_xml(Text = #xmlText{}) ->
+    Text#xmlText{parents=[], pos=0};
+extract_xml(Comment = #xmlComment{}) ->
+    Comment#xmlComment{parents=[], pos=0};
+extract_xml(Other) ->
+    Other.
+
+compare_feed_items(OldItemRow, NewItemRow) ->
+    OldItem = extract_xml(OldItemRow),
+    NewItem = extract_xml(NewItemRow),
+
+    case OldItem =:= NewItem of
+        true -> same;
+        _ ->
+            Handler = fun(E, Acc) ->
+                Acc or is_updated(OldItem, NewItem, E)
+            end,
+            Acc = false,
+            ListXPathAttrs = ["//guid", "//title", "//link"],
+
+            case lists:foldl(Handler, Acc, ListXPathAttrs) of
+                true -> updated;
+                _ -> different
             end
     end.
 
-compare_feed_items(OldItem, NewItem) ->
-    OldString = get_item_string(OldItem),
-    NewString = get_item_string(NewItem),
-    if
-        OldString == NewString ->
-            same;
-        true ->
-            OldGUID = get_item_parameter(OldItem, guid),
-            NewGUID = get_item_parameter(NewItem, guid),
-            ValidGUID = OldGUID /= false andalso NewGUID /= false,
-            if
-                ValidGUID andalso OldGUID == NewGUID ->
-                    updated;
-                true ->
-                    OldTitle = get_item_parameter(OldItem, title),
-                    NewTitle = get_item_parameter(NewItem, title),
-                    ValidTitle = OldTitle /= false andalso NewTitle /= false,
-                    if
-                        ValidTitle andalso OldTitle == NewTitle ->
-                            updated;
-                        true ->
-                            OldLink = get_item_parameter(OldItem, link),
-                            NewLink = get_item_parameter(NewItem, link),
-                            ValidLink = OldLink /= false andalso NewLink /= false,
-                            if
-                                ValidLink andalso OldLink == NewLink -> updated;
-                                true -> different
-                            end
-                    end
+% @private
+% @doc Эта вспомогательная функция проверяет на равенство двух нод 
+% по заданному XPath селектору
+%
+is_updated(OldItem, NewItem, XPathAttr) ->
+    OldAttrValue = xmerl_xpath:string(XPathAttr, OldItem),
+    case OldAttrValue of
+        [] -> false;
+        _ -> NewAttrValue = xmerl_xpath:string(XPathAttr, NewItem),
+            case NewAttrValue of
+                [] -> false ;
+                _ ->
+                    [OldGUID] = OldAttrValue
+                    ,[NewGUID] = NewAttrValue
+                    ,OldGUID == NewGUID
             end
     end.
-
-build_unique_feed(Feed1Items, Feed2Items) ->
-    Func1 = fun(Item, List) ->
-        L = lists:filter(fun(Elem) -> compare_feed_items(Elem, Item) /= different end, Feed2Items),
-        if
-            length(L) > 0 -> [Item] ++ List;
-            true -> List
-        end
-    end,
-    L1 = lists:foldl(Func1, [], Feed1Items),
-    L1U = Feed1Items -- L1,
-    lists:sort(
-        fun(Item1, Item2) -> get_item_time(Item1) < get_item_time(Item2) end, L1U ++ Feed2Items
-    ).
-
-result() ->
-    RSS1 = xmerl_scan:file("digg-science-rss1.xml"),
-    RSS2 = xmerl_scan:file("digg-science-rss2.xml"),
-    Valid1 = is_rss2_feed(RSS1),
-    Valid2 = is_rss2_feed(RSS2),
-    io:format("Are both of the feeds valid? ~p and ~p~n", [Valid1, Valid2]),
-    {Feed1, _} = RSS1,
-    {Feed2, _} = RSS2,
-    Feed1Items = get_feed_items(Feed1, []),
-    Feed2Items = get_feed_items(Feed2, []),
-    DisplayFeed1 = get_items_string(Feed1Items),
-    io:format("The first news feed (~p articles):~n~p~n~n~n~n~n~n~n~n~n~n", [
-        length(DisplayFeed1), DisplayFeed1
-    ]),
-    DisplayFeed2 = get_items_string(Feed2Items),
-    io:format("The second news feed (~p articles):~n~p~n~n~n~n~n~n~n~n~n~n", [
-        length(DisplayFeed2), DisplayFeed2
-    ]),
-    DisplayUniqueFeed = get_items_string(build_unique_feed(Feed1Items, Feed2Items)),
-    io:format("Unique news feed (~p articles):~n~p~n", [
-        length(DisplayUniqueFeed), DisplayUniqueFeed
-    ]).
